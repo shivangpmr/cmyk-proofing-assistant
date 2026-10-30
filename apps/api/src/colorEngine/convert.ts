@@ -16,76 +16,106 @@ export interface SoftProofSample {
   usedApproximate: boolean;
 }
 
-async function transformRgbViaIcc(
-  rgb: RgbColor,
+const sampleCache = new Map<string, SoftProofSample>();
+const SAMPLE_CACHE_LIMIT = 50_000;
+
+/**
+ * sRGB pixels → CMYK (ICC) → sRGB soft proof.
+ * CMYK must travel inside a TIFF with the profile embedded: raw 4-channel
+ * buffers are read back by Sharp as RGBA, not CMYK.
+ */
+async function iccRoundTrip(
+  rgb: Buffer,
+  width: number,
+  height: number,
   iccPath: string,
-): Promise<{ softProof: RgbColor; cmyk: CmykColor } | null> {
-  try {
-    const pixel = Buffer.from([
-      clampByte(rgb.r),
-      clampByte(rgb.g),
-      clampByte(rgb.b),
-    ]);
+): Promise<{ cmyk: Buffer; proof: Buffer; proofChannels: number }> {
+  const input = () => sharp(rgb, { raw: { width, height, channels: 3 } });
 
-    const cmykBuf = await sharp(pixel, {
-      raw: { width: 1, height: 1, channels: 3 },
-    })
-      .toColorspace("srgb")
-      .withIccProfile(iccPath)
-      .toColorspace("cmyk")
-      .raw()
-      .toBuffer();
+  const [cmyk, tiff] = await Promise.all([
+    input().withIccProfile(iccPath).toColorspace("cmyk").raw().toBuffer(),
+    input().withIccProfile(iccPath).toColorspace("cmyk").tiff().toBuffer(),
+  ]);
 
-    const c = cmykBuf[0] ?? 0;
-    const m = cmykBuf[1] ?? 0;
-    const y = cmykBuf[2] ?? 0;
-    const k = cmykBuf[3] ?? 0;
+  const proof = await sharp(tiff)
+    .toColorspace("srgb")
+    .raw()
+    .toBuffer({ resolveWithObject: true });
 
-    const proofBuf = await sharp(Buffer.from([c, m, y, k]), {
-      raw: { width: 1, height: 1, channels: 4 },
-    })
-      .withIccProfile(iccPath)
-      .toColorspace("srgb")
-      .raw()
-      .toBuffer();
+  return { cmyk, proof: proof.data, proofChannels: proof.info.channels };
+}
 
-    return {
-      softProof: {
-        r: proofBuf[0] ?? 0,
-        g: proofBuf[1] ?? 0,
-        b: proofBuf[2] ?? 0,
-      },
-      cmyk: cmykBytesToPercent(c, m, y, k),
-    };
-  } catch {
-    return null;
+export async function softProofBatch(
+  colors: RgbColor[],
+  profile: ProfileInfo,
+): Promise<SoftProofSample[]> {
+  const icc = profileIccPath(profile);
+  const useIcc = Boolean(icc && !profile.approximate);
+  const cacheKey = (c: RgbColor) => `${useIcc ? icc : "approx"}|${rgbToHex(c)}`;
+
+  const results: (SoftProofSample | undefined)[] = colors.map((c) =>
+    sampleCache.get(cacheKey(c)),
+  );
+  const missing = colors
+    .map((c, i) => ({ c, i }))
+    .filter(({ i }) => !results[i]);
+
+  if (missing.length > 0) {
+    let computed: SoftProofSample[] | null = null;
+
+    if (useIcc && icc) {
+      try {
+        const raw = Buffer.from(
+          missing.flatMap(({ c }) => [clampByte(c.r), clampByte(c.g), clampByte(c.b)]),
+        );
+        const { cmyk, proof, proofChannels } = await iccRoundTrip(raw, missing.length, 1, icc);
+        computed = missing.map((_, j) => {
+          const softProofRgb: RgbColor = {
+            r: proof[j * proofChannels]!,
+            g: proof[j * proofChannels + 1]!,
+            b: proof[j * proofChannels + 2]!,
+          };
+          return {
+            softProofRgb,
+            softProofHex: rgbToHex(softProofRgb),
+            cmyk: cmykBytesToPercent(cmyk[j * 4]!, cmyk[j * 4 + 1]!, cmyk[j * 4 + 2]!, cmyk[j * 4 + 3]!),
+            usedApproximate: false,
+          };
+        });
+      } catch {
+        computed = null;
+      }
+    }
+
+    if (!computed) {
+      computed = missing.map(({ c }) => {
+        const softProofRgb = approximateSoftProofRgb(c);
+        return {
+          softProofRgb,
+          softProofHex: rgbToHex(softProofRgb),
+          cmyk: rgbToCmykDisplay(softProofRgb),
+          usedApproximate: true,
+        };
+      });
+    }
+
+    if (sampleCache.size > SAMPLE_CACHE_LIMIT) sampleCache.clear();
+    missing.forEach(({ c, i }, j) => {
+      const sample = computed![j]!;
+      results[i] = sample;
+      sampleCache.set(cacheKey(c), sample);
+    });
   }
+
+  return results as SoftProofSample[];
 }
 
 export async function softProofSample(
   rgb: RgbColor,
   profile: ProfileInfo,
 ): Promise<SoftProofSample> {
-  const icc = profileIccPath(profile);
-  if (icc && !profile.approximate) {
-    const viaIcc = await transformRgbViaIcc(rgb, icc);
-    if (viaIcc) {
-      return {
-        softProofRgb: viaIcc.softProof,
-        softProofHex: rgbToHex(viaIcc.softProof),
-        cmyk: viaIcc.cmyk,
-        usedApproximate: false,
-      };
-    }
-  }
-
-  const softProofRgb = approximateSoftProofRgb(rgb);
-  return {
-    softProofRgb,
-    softProofHex: rgbToHex(softProofRgb),
-    cmyk: rgbToCmykDisplay(softProofRgb),
-    usedApproximate: true,
-  };
+  const [sample] = await softProofBatch([rgb], profile);
+  return sample!;
 }
 
 export async function softProofImageBuffer(
@@ -93,63 +123,32 @@ export async function softProofImageBuffer(
   profile: ProfileInfo,
   maxDimension = 1600,
 ): Promise<{ buffer: Buffer; width: number; height: number; usedApproximate: boolean }> {
-  const meta = await sharp(input).rotate().metadata();
-  const width = meta.width ?? 1;
-  const height = meta.height ?? 1;
-  const scale = Math.min(1, maxDimension / Math.max(width, height));
-  const targetW = Math.max(1, Math.round(width * scale));
-  const targetH = Math.max(1, Math.round(height * scale));
+  const { data, info } = await sharp(input)
+    .rotate()
+    .resize(maxDimension, maxDimension, { fit: "inside", withoutEnlargement: true })
+    .removeAlpha()
+    .toColorspace("srgb")
+    .raw()
+    .toBuffer({ resolveWithObject: true });
 
   const icc = profileIccPath(profile);
   if (icc && !profile.approximate) {
     try {
-      const cmyk = await sharp(input)
-        .rotate()
-        .resize(targetW, targetH, { fit: "inside", withoutEnlargement: true })
-        .removeAlpha()
-        .toColorspace("srgb")
-        .withIccProfile(icc)
-        .toColorspace("cmyk")
-        .toBuffer({ resolveWithObject: true });
-
-      const proof = await sharp(cmyk.data, {
-        raw: {
-          width: cmyk.info.width,
-          height: cmyk.info.height,
-          channels: 4,
-        },
+      const { proof, proofChannels } = await iccRoundTrip(data, info.width, info.height, icc);
+      const png = await sharp(proof, {
+        raw: { width: info.width, height: info.height, channels: proofChannels as 3 | 4 },
       })
-        .withIccProfile(icc)
-        .toColorspace("srgb")
         .png()
         .toBuffer();
-
-      return {
-        buffer: proof,
-        width: cmyk.info.width,
-        height: cmyk.info.height,
-        usedApproximate: false,
-      };
+      return { buffer: png, width: info.width, height: info.height, usedApproximate: false };
     } catch {
       // fall through to approximate soft proof
     }
   }
 
-  const resized = await sharp(input)
-    .rotate()
-    .resize(targetW, targetH, { fit: "inside", withoutEnlargement: true })
-    .ensureAlpha()
-    .raw()
-    .toBuffer({ resolveWithObject: true });
-
-  const { data, info } = resized;
   const out = Buffer.alloc(info.width * info.height * 3);
   for (let i = 0, j = 0; i < data.length; i += info.channels, j += 3) {
-    const proof = approximateSoftProofRgb({
-      r: data[i]!,
-      g: data[i + 1]!,
-      b: data[i + 2]!,
-    });
+    const proof = approximateSoftProofRgb({ r: data[i]!, g: data[i + 1]!, b: data[i + 2]! });
     out[j] = proof.r;
     out[j + 1] = proof.g;
     out[j + 2] = proof.b;
@@ -161,12 +160,7 @@ export async function softProofImageBuffer(
     .png()
     .toBuffer();
 
-  return {
-    buffer: png,
-    width: info.width,
-    height: info.height,
-    usedApproximate: true,
-  };
+  return { buffer: png, width: info.width, height: info.height, usedApproximate: true };
 }
 
 export async function exportCmykTiff(
@@ -183,7 +177,6 @@ export async function exportCmykTiff(
       .toColorspace("srgb")
       .withIccProfile(icc)
       .toColorspace("cmyk")
-      .withIccProfile(icc)
       .tiff({ compression: "lzw" })
       .toBuffer();
   } catch {

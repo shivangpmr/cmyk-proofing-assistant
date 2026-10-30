@@ -18,7 +18,12 @@ import {
   rgbToLab,
   hexToRgb,
 } from "./colorMath.js";
-import { exportCmykTiff, softProofImageBuffer, softProofSample } from "./convert.js";
+import {
+  exportCmykTiff,
+  softProofBatch,
+  softProofImageBuffer,
+  softProofSample,
+} from "./convert.js";
 import { explainShift } from "./explanations.js";
 import { nameColor } from "./naming.js";
 import { listProfiles, resolveProfile } from "./profiles.js";
@@ -92,46 +97,16 @@ export const colorEngine = {
       maxColors,
     );
 
-    const colors: AnalyzedColor[] = [];
-    let usedApproximate = profile.approximate;
-
-    for (let i = 0; i < clusters.length; i++) {
-      const cluster = clusters[i]!;
-      const sample = await softProofSample(cluster.rgb, profile);
-      usedApproximate = usedApproximate || sample.usedApproximate;
-      const lab = rgbToLab(cluster.rgb);
-      const proofLab = rgbToLab(sample.softProofRgb);
-      const deltaE = deltaE00(lab, proofLab);
-      const severity = severityFromDeltaE(deltaE);
-      const suggestions =
-        includeSuggestions && severity !== "safe"
-          ? await generateSuggestions(cluster.rgb, profile)
-          : [];
-
-      colors.push({
-        id: `c${i + 1}`,
-        rgb: cluster.rgb,
-        hex: cluster.hex,
-        hsl: rgbToHsl(cluster.rgb),
-        lab,
-        softProofRgb: sample.softProofRgb,
-        softProofHex: sample.softProofHex,
-        cmyk: sample.cmyk,
-        deltaE,
-        severity,
-        gamutStatus: severity === "safe" ? "within" : "outside",
-        explanation: explainShift(cluster.rgb, sample.softProofRgb, deltaE),
-        weight: cluster.weight,
-        name: nameColor(cluster.rgb, lab),
-        suggestions,
-      });
-    }
-
-    const summary = buildSummary(colors);
+    const { colors, usedApproximate } = await analyzeColors(
+      clusters.map((c) => ({ rgb: c.rgb, weight: c.weight })),
+      "c",
+      profile,
+      includeSuggestions,
+    );
 
     return {
       profile,
-      summary,
+      summary: buildSummary(colors),
       colors,
       analysisWidth: working.info.width,
       analysisHeight: working.info.height,
@@ -141,37 +116,12 @@ export const colorEngine = {
 
   async analyzeHexColors(hexes: string[], profileId: ProfileId | string): Promise<AnalysisResult> {
     const profile = resolveProfile(profileId);
-    const colors: AnalyzedColor[] = [];
-    let usedApproximate = profile.approximate;
-
-    for (let i = 0; i < hexes.length; i++) {
-      const rgb = hexToRgb(hexes[i]!);
-      const sample = await softProofSample(rgb, profile);
-      usedApproximate = usedApproximate || sample.usedApproximate;
-      const lab = rgbToLab(rgb);
-      const deltaE = deltaE00(lab, rgbToLab(sample.softProofRgb));
-      const severity = severityFromDeltaE(deltaE);
-      const suggestions =
-        severity !== "safe" ? await generateSuggestions(rgb, profile) : [];
-
-      colors.push({
-        id: `seed-${i + 1}`,
-        rgb,
-        hex: rgbToHex(rgb),
-        hsl: rgbToHsl(rgb),
-        lab,
-        softProofRgb: sample.softProofRgb,
-        softProofHex: sample.softProofHex,
-        cmyk: sample.cmyk,
-        deltaE,
-        severity,
-        gamutStatus: severity === "safe" ? "within" : "outside",
-        explanation: explainShift(rgb, sample.softProofRgb, deltaE),
-        weight: 1,
-        name: nameColor(rgb, lab),
-        suggestions,
-      });
-    }
+    const { colors, usedApproximate } = await analyzeColors(
+      hexes.map((hex) => ({ rgb: hexToRgb(hex), weight: 1 })),
+      "seed-",
+      profile,
+      true,
+    );
 
     return {
       profile,
@@ -183,6 +133,54 @@ export const colorEngine = {
     };
   },
 };
+
+async function analyzeColors(
+  inputs: { rgb: RgbColor; weight: number }[],
+  idPrefix: string,
+  profile: ProfileInfo,
+  includeSuggestions: boolean,
+): Promise<{ colors: AnalyzedColor[]; usedApproximate: boolean }> {
+  const samples = await softProofBatch(
+    inputs.map((c) => c.rgb),
+    profile,
+  );
+
+  const colors = await Promise.all(
+    inputs.map(async ({ rgb, weight }, i): Promise<AnalyzedColor> => {
+      const sample = samples[i]!;
+      const lab = rgbToLab(rgb);
+      const deltaE = deltaE00(lab, rgbToLab(sample.softProofRgb));
+      const severity = severityFromDeltaE(deltaE);
+      const suggestions =
+        includeSuggestions && severity !== "safe"
+          ? await generateSuggestions(rgb, profile)
+          : [];
+
+      return {
+        id: `${idPrefix}${i + 1}`,
+        rgb,
+        hex: rgbToHex(rgb),
+        hsl: rgbToHsl(rgb),
+        lab,
+        softProofRgb: sample.softProofRgb,
+        softProofHex: sample.softProofHex,
+        cmyk: sample.cmyk,
+        deltaE,
+        severity,
+        gamutStatus: severity === "safe" ? "within" : "outside",
+        explanation: explainShift(rgb, sample.softProofRgb, deltaE),
+        weight,
+        name: nameColor(rgb, lab),
+        suggestions,
+      };
+    }),
+  );
+
+  return {
+    colors,
+    usedApproximate: profile.approximate || samples.some((s) => s.usedApproximate),
+  };
+}
 
 function buildSummary(colors: AnalyzedColor[]): AnalysisSummary {
   const safeCount = colors.filter((c) => c.severity === "safe").length;

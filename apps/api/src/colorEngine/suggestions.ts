@@ -1,5 +1,5 @@
 import type { ColorSuggestion, ProfileInfo, RgbColor } from "@cmyk/shared";
-import { softProofSample } from "./convert.js";
+import { softProofBatch, softProofSample, type SoftProofSample } from "./convert.js";
 import { deltaE00, labToRgb, rgbToHex, rgbToLab } from "./colorMath.js";
 
 interface CandidateScore {
@@ -14,12 +14,11 @@ interface CandidateScore {
   printability: number;
 }
 
-async function scoreCandidate(
+function scoreCandidate(
   candidate: RgbColor,
   originalLab: ReturnType<typeof rgbToLab>,
-  profile: ProfileInfo,
-): Promise<CandidateScore> {
-  const proof = await softProofSample(candidate, profile);
+  proof: SoftProofSample,
+): CandidateScore {
   const candLab = rgbToLab(candidate);
   const proofLab = rgbToLab(proof.softProofRgb);
   const deltaE = deltaE00(originalLab, proofLab);
@@ -110,15 +109,10 @@ export async function suggestAlternatives(
     (rgb) => rgbToHex(rgb) !== originalHex,
   );
   const toScore = ordered.slice(0, 70);
+  if (toScore.length === 0) toScore.push(originalProof.softProofRgb);
 
-  const scored: CandidateScore[] = [];
-  for (const rgb of toScore) {
-    scored.push(await scoreCandidate(rgb, originalLab, profile));
-  }
-
-  if (scored.length === 0) {
-    scored.push(await scoreCandidate(originalProof.softProofRgb, originalLab, profile));
-  }
+  const proofs = await softProofBatch(toScore, profile);
+  const scored = toScore.map((rgb, i) => scoreCandidate(rgb, originalLab, proofs[i]!));
 
   const closest = [...scored].sort(
     (a, b) => a.similarity - b.similarity || a.printability - b.printability,

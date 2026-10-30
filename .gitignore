@@ -22,3 +22,5 @@ packages/shared/dist
 .tmp*
 test-neon.png
 .tmp-*.json
+
+.vercel
