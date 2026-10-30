@@ -1,6 +1,7 @@
 import cors from "cors";
 import express from "express";
 import multer from "multer";
+import sharp from "sharp";
 import { SEED_TEST_COLORS } from "@cmyk/shared";
 import { colorEngine } from "./colorEngine/index.js";
 
@@ -44,12 +45,17 @@ app.post("/api/proof", upload.single("file"), async (req, res) => {
     }
     const profileId = String(req.body.profileId ?? "auto");
     const result = await colorEngine.softProofImage(req.file.buffer, profileId);
+    // Base64 PNG of a photo can exceed the hosted ~4.5 MB response limit.
+    const jpeg = await sharp(result.buffer)
+      .jpeg({ quality: 92, chromaSubsampling: "4:4:4" })
+      .toBuffer();
     res.json({
       profile: result.profile,
       usedApproximate: result.usedApproximate,
       width: result.width,
       height: result.height,
-      proofPngBase64: result.buffer.toString("base64"),
+      proofBase64: jpeg.toString("base64"),
+      proofMime: "image/jpeg",
     });
   } catch (err) {
     res.status(500).json({ error: String(err) });

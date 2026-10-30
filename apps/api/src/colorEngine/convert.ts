@@ -177,7 +177,7 @@ export async function exportCmykTiff(
       .toColorspace("srgb")
       .withIccProfile(icc)
       .toColorspace("cmyk")
-      .tiff({ compression: "lzw" })
+      .tiff({ compression: "deflate", predictor: "horizontal" })
       .toBuffer();
   } catch {
     return null;

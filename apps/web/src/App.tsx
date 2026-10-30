@@ -11,16 +11,17 @@ import {
   downloadReport,
   downloadTiff,
   fetchAnalysis,
-  fetchMeta,
   fetchProfiles,
   fetchProof,
   fetchSeedAnalysis,
 } from "@/lib/api";
 import { remapImageUrl } from "@/lib/remap";
+import { createWorkingCopy } from "@/lib/workingCopy";
 
 export default function App() {
   const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
   const [profileId, setProfileId] = useState("auto");
+  const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [originalUrl, setOriginalUrl] = useState<string | null>(null);
   const [proofUrl, setProofUrl] = useState<string | null>(null);
@@ -55,23 +56,21 @@ export default function App() {
     setSeedMode(false);
     setMappings({});
     setProgress("Preparing image…");
-    const url = URL.createObjectURL(nextFile);
-    setFile(nextFile);
-    setOriginalUrl(url);
-    setDisplayOriginal(url);
 
     try {
-      setProgress("Reading metadata…");
-      const imageMeta = await fetchMeta(nextFile);
-      setMeta(imageMeta);
+      const working = await createWorkingCopy(nextFile);
+      setFile(working.file);
+      setMeta(working.meta);
+      setOriginalUrl(working.url);
+      setDisplayOriginal(working.url);
 
       setProgress("Generating CMYK soft proof…");
-      const proof = await fetchProof(nextFile, nextProfileId);
+      const proof = await fetchProof(working.file, nextProfileId);
       setProofUrl(proof.proofUrl);
       setDisplayProof(proof.proofUrl);
 
       setProgress("Analyzing colors…");
-      const result = await fetchAnalysis(nextFile, nextProfileId);
+      const result = await fetchAnalysis(working.file, nextProfileId);
       setAnalysis(result);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -106,12 +105,13 @@ export default function App() {
   }, []);
 
   const onFile = (f: File) => {
+    setSourceFile(f);
     void runPipeline(f, profileId);
   };
 
   const onProfileChange = (id: string) => {
     setProfileId(id);
-    if (file) void runPipeline(file, id);
+    if (sourceFile && !seedMode) void runPipeline(sourceFile, id);
     else if (seedMode) void runSeed(id);
   };
 
@@ -190,9 +190,11 @@ export default function App() {
                   <button
                     type="button"
                     className="block w-full px-3 py-2 text-left text-sm hover:bg-paper disabled:opacity-40"
-                    disabled={!file}
+                    disabled={!file || !proofUrl}
                     onClick={() => {
-                      if (file) void downloadProof(file, profileId);
+                      if (proofUrl && activeProfile) {
+                        void downloadProof(proofUrl, activeProfile.shortLabel);
+                      }
                       setExportOpen(false);
                     }}
                   >

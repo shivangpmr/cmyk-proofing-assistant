@@ -1,15 +1,23 @@
-import type {
-  AnalysisResult,
-  ImageMeta,
-  ProfileId,
-  ProfileInfo,
-} from "@cmyk/shared";
+import type { AnalysisResult, ProfileId, ProfileInfo } from "@cmyk/shared";
+
+async function errorFrom(res: Response): Promise<Error> {
+  const text = await res.text();
+  if (res.status === 413 || text.includes("PAYLOAD_TOO_LARGE")) {
+    return new Error(
+      "This file is too large for the hosted preview. Try a smaller export, or run the app locally for full-size files.",
+    );
+  }
+  try {
+    const json = JSON.parse(text) as { error?: string };
+    if (json.error) return new Error(json.error);
+  } catch {
+    // not JSON
+  }
+  return new Error(text || res.statusText);
+}
 
 async function parseJson<T>(res: Response): Promise<T> {
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || res.statusText);
-  }
+  if (!res.ok) throw await errorFrom(res);
   return res.json() as Promise<T>;
 }
 
@@ -18,15 +26,6 @@ export async function fetchProfiles(): Promise<ProfileInfo[]> {
     await fetch("/api/profiles"),
   );
   return data.profiles;
-}
-
-export async function fetchMeta(file: File): Promise<ImageMeta> {
-  const form = new FormData();
-  form.append("file", file);
-  const data = await parseJson<{ meta: ImageMeta }>(
-    await fetch("/api/meta", { method: "POST", body: form }),
-  );
-  return data.meta;
 }
 
 export async function fetchProof(
@@ -47,7 +46,8 @@ export async function fetchProof(
     usedApproximate: boolean;
     width: number;
     height: number;
-    proofPngBase64: string;
+    proofBase64: string;
+    proofMime: string;
   }>(await fetch("/api/proof", { method: "POST", body: form }));
 
   return {
@@ -55,7 +55,7 @@ export async function fetchProof(
     usedApproximate: data.usedApproximate,
     width: data.width,
     height: data.height,
-    proofUrl: `data:image/png;base64,${data.proofPngBase64}`,
+    proofUrl: `data:${data.proofMime};base64,${data.proofBase64}`,
   };
 }
 
@@ -85,14 +85,11 @@ export async function fetchSeedAnalysis(
   return data.analysis;
 }
 
-export async function downloadProof(file: File, profileId: string) {
-  const form = new FormData();
-  form.append("file", file);
-  form.append("profileId", profileId);
-  const res = await fetch("/api/export/proof", { method: "POST", body: form });
-  if (!res.ok) throw new Error(await res.text());
-  const blob = await res.blob();
-  triggerDownload(blob, "cmyk-soft-proof.png");
+export async function downloadProof(proofUrl: string, profileLabel: string) {
+  const blob = await (await fetch(proofUrl)).blob();
+  const ext = blob.type === "image/png" ? "png" : "jpg";
+  const slug = profileLabel.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+  triggerDownload(blob, `cmyk-soft-proof-${slug}.${ext}`);
 }
 
 export async function downloadReport(file: File | null, profileId: string, seed = false) {
@@ -101,7 +98,7 @@ export async function downloadReport(file: File | null, profileId: string, seed 
   form.append("profileId", profileId);
   if (seed) form.append("seed", "1");
   const res = await fetch("/api/export/report", { method: "POST", body: form });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await errorFrom(res);
   const blob = await res.blob();
   triggerDownload(blob, "cmyk-proofing-report.html");
 }
@@ -111,10 +108,7 @@ export async function downloadTiff(file: File, profileId: string) {
   form.append("file", file);
   form.append("profileId", profileId);
   const res = await fetch("/api/export/tiff", { method: "POST", body: form });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.error || "TIFF export failed");
-  }
+  if (!res.ok) throw await errorFrom(res);
   const blob = await res.blob();
   triggerDownload(blob, "cmyk-export.tif");
 }
