@@ -3,22 +3,22 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "workspaces": [
     "apps/*",
     "packages/*"
   ],
   "scripts": {
+    "predev": "npm run build -w @cmyk/shared",
     "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev -w @cmyk/api\" \"npm run dev -w @cmyk/web\"",
     "dev:api": "npm run dev -w @cmyk/api",
     "dev:web": "npm run dev -w @cmyk/web",
     "build": "npm run build -w @cmyk/shared && npm run build -w @cmyk/api && npm run build -w @cmyk/web",
-    "fetch-profiles": "node scripts/fetch-profiles.mjs",
     "vercel-build": "npm run build"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"
-  },
-  "allowScripts": {
-    "sharp@0.33.5": true
   }
 }

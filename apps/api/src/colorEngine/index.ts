@@ -1,10 +1,8 @@
-import sharp from "sharp";
 import {
   severityFromDeltaE,
   type AnalysisResult,
   type AnalyzedColor,
   type AnalysisSummary,
-  type ImageMeta,
   type PrintReadiness,
   type ProfileId,
   type ProfileInfo,
@@ -19,12 +17,13 @@ import {
   hexToRgb,
 } from "./colorMath.js";
 import {
+  decodeInput,
   exportCmykTiff,
   softProofBatch,
   softProofImageBuffer,
   softProofSample,
 } from "./convert.js";
-import { explainShift } from "./explanations.js";
+import { describeShift, explainShift } from "./explanations.js";
 import { nameColor } from "./naming.js";
 import { listProfiles, resolveProfile } from "./profiles.js";
 import { suggestAlternatives as generateSuggestions } from "./suggestions.js";
@@ -62,17 +61,6 @@ export const colorEngine = {
     return { profile, buffer };
   },
 
-  async getImageMeta(input: Buffer, filename: string): Promise<ImageMeta> {
-    const meta = await sharp(input).metadata();
-    return {
-      filename,
-      width: meta.width ?? 0,
-      height: meta.height ?? 0,
-      format: meta.format ?? "unknown",
-      colorMode: meta.space ?? (meta.hasProfile ? "Tagged" : "sRGB (assumed)"),
-    };
-  },
-
   async analyzeImage(
     input: Buffer,
     profileId: ProfileId | string,
@@ -82,7 +70,7 @@ export const colorEngine = {
     const maxColors = options?.maxColors ?? 12;
     const includeSuggestions = options?.includeSuggestions ?? true;
 
-    const working = await sharp(input)
+    const working = await decodeInput(input)
       .rotate()
       .resize(1200, 1200, { fit: "inside", withoutEnlargement: true })
       .ensureAlpha()
@@ -168,6 +156,7 @@ async function analyzeColors(
         deltaE,
         severity,
         gamutStatus: severity === "safe" ? "within" : "outside",
+        shiftSummary: describeShift(rgb, sample.softProofRgb, deltaE),
         explanation: explainShift(rgb, sample.softProofRgb, deltaE),
         weight,
         name: nameColor(rgb, lab),

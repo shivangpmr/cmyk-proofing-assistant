@@ -1,5 +1,5 @@
-import { Info } from "lucide-react";
 import type { ProfileInfo } from "@cmyk/shared";
+import { HelpTip } from "@/components/HelpTip";
 
 export function ProfileSelector({
   profiles,
@@ -11,29 +11,32 @@ export function ProfileSelector({
   onChange: (id: string) => void;
 }) {
   return (
-    <div className="flex items-center gap-2">
-      <label className="text-xs font-medium tracking-wide text-muted" htmlFor="profile">
-        CMYK Profile
+    <div className="flex items-center gap-1.5">
+      <label
+        className="hidden text-xs font-medium tracking-wide text-muted sm:inline"
+        htmlFor="profile"
+      >
+        Print profile
       </label>
       <select
         id="profile"
+        aria-label="Print profile"
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="max-w-[240px] rounded-sm border border-line bg-surface px-2 py-1.5 text-sm"
+        className="max-w-[200px] rounded-sm border border-line bg-surface px-2 py-1.5 text-sm sm:max-w-[240px]"
       >
         {profiles.map((p) => (
-          <option key={p.id} value={p.id} disabled={p.id !== "auto" && !p.installed && false}>
+          <option key={p.id} value={p.id}>
             {p.label}
             {p.id !== "auto" && !p.installed ? " (not installed)" : ""}
           </option>
         ))}
       </select>
-      <span
-        title="CMYK appearance depends on the print condition and ICC profile. Select the profile your printer recommends."
-        className="text-muted"
-      >
-        <Info className="size-4" />
-      </span>
+      <HelpTip label="What is a print profile?">
+        The printing standard (ICC profile) your printer uses. It changes how colors will
+        look on paper. <strong>Not sure? Keep Auto</strong>, or ask your printer which
+        profile they want.
+      </HelpTip>
     </div>
   );
 }

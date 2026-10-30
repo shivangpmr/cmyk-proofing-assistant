@@ -2,6 +2,9 @@ import type { ColorSuggestion, ProfileInfo, RgbColor } from "@cmyk/shared";
 import { softProofBatch, softProofSample, type SoftProofSample } from "./convert.js";
 import { deltaE00, labToRgb, rgbToHex, rgbToLab } from "./colorMath.js";
 
+/** Smallest ΔE00 gain worth suggesting; below this the change is imperceptible. */
+const MIN_IMPROVEMENT = 0.5;
+
 interface CandidateScore {
   rgb: RgbColor;
   hex: string;
@@ -112,7 +115,12 @@ export async function suggestAlternatives(
   if (toScore.length === 0) toScore.push(originalProof.softProofRgb);
 
   const proofs = await softProofBatch(toScore, profile);
-  const scored = toScore.map((rgb, i) => scoreCandidate(rgb, originalLab, proofs[i]!));
+  // A suggestion must print visibly closer to the intended color than the original does.
+  const scored = toScore
+    .map((rgb, i) => scoreCandidate(rgb, originalLab, proofs[i]!))
+    .filter((s) => s.deltaE <= originalDelta - MIN_IMPROVEMENT);
+
+  if (scored.length === 0) return [];
 
   const closest = [...scored].sort(
     (a, b) => a.similarity - b.similarity || a.printability - b.printability,
@@ -126,10 +134,7 @@ export async function suggestAlternatives(
 
   const balanced = [...scored].sort((a, b) => {
     const score = (s: CandidateScore) =>
-      s.similarity * 0.45 +
-      s.printability * 0.55 +
-      (s.similarity >= originalDelta ? 6 : 0) +
-      (s.printability > 5 ? 4 : 0);
+      s.similarity * 0.45 + s.printability * 0.55 + (s.printability > 5 ? 4 : 0);
     return score(a) - score(b);
   })[0]!;
 
@@ -147,9 +152,16 @@ export async function suggestAlternatives(
     residualDeltaE: s.residualDeltaE,
   });
 
-  return [
-    toSuggestion("closest", closest),
-    toSuggestion("balanced", balanced),
-    toSuggestion("safer", safer),
+  const picks: [ColorSuggestion["kind"], CandidateScore][] = [
+    ["balanced", balanced],
+    ["closest", closest],
+    ["safer", safer],
   ];
+  const seen = new Set<string>();
+  const unique = picks.filter(([, s]) => {
+    if (seen.has(s.hex)) return false;
+    seen.add(s.hex);
+    return true;
+  });
+  return unique.map(([kind, s]) => toSuggestion(kind, s));
 }

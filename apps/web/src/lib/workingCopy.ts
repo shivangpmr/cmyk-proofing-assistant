@@ -23,7 +23,10 @@ export async function createWorkingCopy(original: File): Promise<WorkingCopy> {
     // SVGs without width/height attributes report 0 intrinsic size.
     const width = img.naturalWidth || WORKING_MAX_EDGE;
     const height = img.naturalHeight || WORKING_MAX_EDGE;
-    const scale = Math.min(1, WORKING_MAX_EDGE / Math.max(width, height));
+    // Vectors rasterize losslessly, so render them at the full working size.
+    const isVector = original.type === "image/svg+xml";
+    const fit = WORKING_MAX_EDGE / Math.max(width, height);
+    const scale = isVector ? fit : Math.min(1, fit);
     const targetW = Math.max(1, Math.round(width * scale));
     const targetH = Math.max(1, Math.round(height * scale));
 

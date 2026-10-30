@@ -25,7 +25,7 @@ export function ComparisonSlider({
     <div className="w-full">
       <div
         ref={frame}
-        className="relative aspect-[4/3] w-full overflow-hidden border border-line bg-[#e8e8e6] select-none"
+        className="relative aspect-[4/3] max-h-[70vh] w-full touch-pan-y overflow-hidden border border-line bg-[#e8e8e6] select-none"
         onPointerDown={(e) => {
           dragging.current = true;
           e.currentTarget.setPointerCapture(e.pointerId);

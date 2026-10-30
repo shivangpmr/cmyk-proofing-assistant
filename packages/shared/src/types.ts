@@ -62,6 +62,8 @@ export interface AnalyzedColor {
   deltaE: number;
   severity: ShiftSeverity;
   gamutStatus: "within" | "outside";
+  /** Plain-language headline, e.g. "Will print duller and darker". */
+  shiftSummary: string;
   explanation: string;
   weight: number;
   name: string;

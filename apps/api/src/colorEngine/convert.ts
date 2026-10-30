@@ -16,6 +16,13 @@ export interface SoftProofSample {
   usedApproximate: boolean;
 }
 
+/** Rejects decompression bombs before libvips allocates the full image. */
+export const MAX_INPUT_PIXELS = 40_000_000;
+
+export function decodeInput(input: Buffer) {
+  return sharp(input, { limitInputPixels: MAX_INPUT_PIXELS });
+}
+
 const sampleCache = new Map<string, SoftProofSample>();
 const SAMPLE_CACHE_LIMIT = 50_000;
 
@@ -123,7 +130,7 @@ export async function softProofImageBuffer(
   profile: ProfileInfo,
   maxDimension = 1600,
 ): Promise<{ buffer: Buffer; width: number; height: number; usedApproximate: boolean }> {
-  const { data, info } = await sharp(input)
+  const { data, info } = await decodeInput(input)
     .rotate()
     .resize(maxDimension, maxDimension, { fit: "inside", withoutEnlargement: true })
     .removeAlpha()
@@ -171,7 +178,7 @@ export async function exportCmykTiff(
   if (!icc || profile.approximate) return null;
 
   try {
-    return await sharp(input)
+    return await decodeInput(input)
       .rotate()
       .removeAlpha()
       .toColorspace("srgb")

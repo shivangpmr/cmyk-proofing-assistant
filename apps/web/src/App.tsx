@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Download, FlaskConical, LoaderCircle } from "lucide-react";
+import { Download, LoaderCircle, Sparkles } from "lucide-react";
 import type { AnalysisResult, ImageMeta, ProfileInfo } from "@cmyk/shared";
 import { ComparisonSlider } from "@/components/ComparisonSlider";
+import { HelpTip } from "@/components/HelpTip";
 import { ProfileSelector } from "@/components/ProfileSelector";
 import { SuggestionsPanel } from "@/components/SuggestionsPanel";
 import { UploadZone } from "@/components/UploadZone";
@@ -87,7 +88,7 @@ export default function App() {
     setFile(null);
     setMeta(null);
     setMappings({});
-    setProgress("Running seed color tests…");
+    setProgress("Loading sample colors…");
     try {
       const result = await fetchSeedAnalysis(nextProfileId);
       setAnalysis(result);
@@ -105,7 +106,15 @@ export default function App() {
   }, []);
 
   const onFile = (f: File) => {
+    // A new file must never show the previous design's results.
     setSourceFile(f);
+    setFile(null);
+    setMeta(null);
+    setAnalysis(null);
+    setOriginalUrl(null);
+    setProofUrl(null);
+    setDisplayOriginal(null);
+    setDisplayProof(null);
     void runPipeline(f, profileId);
   };
 
@@ -159,6 +168,15 @@ export default function App() {
     setMappings(next);
   };
 
+  const errorBanner = error ? (
+    <div
+      role="alert"
+      className="border border-danger/30 bg-danger/5 px-4 py-3 text-sm text-danger"
+    >
+      {error}
+    </div>
+  ) : null;
+
   const anyInstalled = profiles.some((p) => p.id !== "auto" && p.installed);
   const usedApprox = analysis?.usedApproximate ?? !anyInstalled;
 
@@ -172,7 +190,7 @@ export default function App() {
               Proofing Assistant
             </h1>
           </div>
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
             {profiles.length > 0 && (
               <ProfileSelector
                 profiles={profiles}
@@ -181,9 +199,14 @@ export default function App() {
               />
             )}
             <div className="relative">
-              <Button variant="outline" onClick={() => setExportOpen((v) => !v)}>
+              <Button
+                variant="outline"
+                aria-label="Export"
+                aria-expanded={exportOpen}
+                onClick={() => setExportOpen((v) => !v)}
+              >
                 <Download className="size-4" />
-                Export
+                <span className="hidden sm:inline">Export</span>
               </Button>
               {exportOpen && (
                 <div className="absolute right-0 z-20 mt-1 w-56 border border-line bg-surface p-1 shadow-sm">
@@ -228,16 +251,25 @@ export default function App() {
                 </div>
               )}
             </div>
-            <Button variant="ghost" onClick={() => void runSeed(profileId)} title="Developer seed colors">
-              <FlaskConical className="size-4" />
-              <span className="hidden sm:inline">Test colors</span>
+            <Button
+              variant="ghost"
+              onClick={() => void runSeed(profileId)}
+              aria-label="Try a sample"
+            >
+              <Sparkles className="size-4" />
+              <span className="hidden sm:inline">Try a sample</span>
             </Button>
           </div>
         </div>
       </header>
 
       <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-8">
-        {!originalUrl && !loading && <UploadZone onFile={onFile} />}
+        {!originalUrl && !loading && (
+          <div className="mx-auto max-w-2xl space-y-4">
+            {errorBanner}
+            <UploadZone onFile={onFile} onTrySample={() => void runSeed(profileId)} />
+          </div>
+        )}
 
         {(originalUrl || loading) && (
           <div className="space-y-6">
@@ -257,26 +289,39 @@ export default function App() {
               </div>
             )}
 
-            {error && (
-              <div className="border border-danger/30 bg-danger/5 px-4 py-3 text-sm text-danger">
-                {error}
-              </div>
-            )}
+            {errorBanner}
 
             {displayOriginal && displayProof && activeProfile && (
               <>
+                <ol className="grid gap-2 text-sm text-muted sm:grid-cols-3">
+                  {[
+                    "Drag the slider to compare your screen colors (left) with the print preview (right).",
+                    "Check the colors listed under Print Readiness below.",
+                    "Use “Show suggested color in preview” to try a safer alternative.",
+                  ].map((step, i) => (
+                    <li key={step} className="flex gap-2 border border-line bg-surface px-3 py-2">
+                      <span className="font-mono text-xs text-ink">{i + 1}</span>
+                      <span>{step}</span>
+                    </li>
+                  ))}
+                </ol>
                 <ComparisonSlider
                   originalUrl={displayOriginal}
                   proofUrl={displayProof}
                   profileLabel={activeProfile.shortLabel}
                 />
-                <div className="flex flex-wrap gap-x-6 gap-y-2 border border-line bg-surface px-4 py-3 font-mono text-xs text-muted">
+                <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border border-line bg-surface px-4 py-3 font-mono text-xs text-muted">
                   <span>
                     <strong className="text-ink">RGB</strong> sRGB
                   </span>
-                  <span>
-                    <strong className="text-ink">CMYK</strong> {activeProfile.label}
+                  <span className="inline-flex items-center gap-1">
+                    <strong className="text-ink">CMYK soft proof</strong> {activeProfile.label}
                     {usedApprox ? " · approximate simulation" : ""}
+                    <HelpTip label="What is a soft proof?">
+                      A <strong>soft proof</strong> is an on-screen preview of how printed ink is
+                      likely to look. It's a simulation: real results depend on the printer,
+                      paper and ink.
+                    </HelpTip>
                   </span>
                   {analysis && (
                     <span>
@@ -309,7 +354,7 @@ export default function App() {
         <p className="mt-10 text-center text-xs text-muted">
           Soft proofing is an on-screen simulation. Final appearance depends on the
           printer, paper, ink, press conditions, and ICC profile.
-          {!anyInstalled && (
+          {profiles.length > 0 && !anyInstalled && (
             <>
               {" "}
               Place ICC files in <code className="font-mono">/profiles</code> for

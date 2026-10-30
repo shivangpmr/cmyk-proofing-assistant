@@ -1,20 +1,67 @@
 import cors from "cors";
-import express from "express";
+import express, {
+  type ErrorRequestHandler,
+  type Request,
+  type RequestHandler,
+  type Response,
+} from "express";
+import { rateLimit } from "express-rate-limit";
 import multer from "multer";
 import sharp from "sharp";
 import { SEED_TEST_COLORS } from "@cmyk/shared";
 import { colorEngine } from "./colorEngine/index.js";
 
+class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+const ACCEPTED_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/svg+xml"]);
+
 const maxUploadMb = process.env.VERCEL ? 4.5 : 40;
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: maxUploadMb * 1024 * 1024 },
+  limits: { fileSize: maxUploadMb * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, cb) => {
+    if (ACCEPTED_TYPES.has(file.mimetype)) cb(null, true);
+    else cb(new HttpError(415, "Unsupported file type. Upload a PNG, JPG, WebP or SVG image."));
+  },
 });
+
+// In-memory, so limits are per serverless instance: a best-effort guard, not a quota.
+const limiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  limit: 30,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { error: "Too many requests. Please wait a few minutes and try again." },
+});
+
+const route =
+  (handler: (req: Request, res: Response) => Promise<void>): RequestHandler =>
+  (req, res, next) => {
+    handler(req, res).catch(next);
+  };
+
+function requireFile(req: Request): Express.Multer.File {
+  if (!req.file) throw new HttpError(400, "No image was uploaded.");
+  return req.file;
+}
+
+function profileIdFrom(req: Request): string {
+  return String(req.body?.profileId ?? "auto");
+}
 
 const app = express();
 
+app.set("trust proxy", 1);
 app.use(cors());
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "100kb" }));
+app.use("/api", (req, res, next) => (req.method === "POST" ? limiter(req, res, next) : next()));
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, service: "cmyk-proofing-assistant" });
@@ -24,27 +71,12 @@ app.get("/api/profiles", (_req, res) => {
   res.json({ profiles: colorEngine.listProfiles() });
 });
 
-app.post("/api/meta", upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file) {
-      res.status(400).json({ error: "Missing file" });
-      return;
-    }
-    const meta = await colorEngine.getImageMeta(req.file.buffer, req.file.originalname);
-    res.json({ meta });
-  } catch (err) {
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-app.post("/api/proof", upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file) {
-      res.status(400).json({ error: "Missing file" });
-      return;
-    }
-    const profileId = String(req.body.profileId ?? "auto");
-    const result = await colorEngine.softProofImage(req.file.buffer, profileId);
+app.post(
+  "/api/proof",
+  upload.single("file"),
+  route(async (req, res) => {
+    const file = requireFile(req);
+    const result = await colorEngine.softProofImage(file.buffer, profileIdFrom(req));
     // Base64 PNG of a photo can exceed the hosted ~4.5 MB response limit.
     const jpeg = await sharp(result.buffer)
       .jpeg({ quality: 92, chromaSubsampling: "4:4:4" })
@@ -57,100 +89,65 @@ app.post("/api/proof", upload.single("file"), async (req, res) => {
       proofBase64: jpeg.toString("base64"),
       proofMime: "image/jpeg",
     });
-  } catch (err) {
-    res.status(500).json({ error: String(err) });
-  }
-});
+  }),
+);
 
-app.post("/api/analyze", upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file) {
-      res.status(400).json({ error: "Missing file" });
-      return;
-    }
-    const profileId = String(req.body.profileId ?? "auto");
-    const analysis = await colorEngine.analyzeImage(req.file.buffer, profileId);
+app.post(
+  "/api/analyze",
+  upload.single("file"),
+  route(async (req, res) => {
+    const file = requireFile(req);
+    const analysis = await colorEngine.analyzeImage(file.buffer, profileIdFrom(req));
     res.json({ analysis });
-  } catch (err) {
-    res.status(500).json({ error: String(err) });
-  }
-});
+  }),
+);
 
-app.post("/api/suggest", async (req, res) => {
-  try {
-    const { hex, rgb, profileId = "auto" } = req.body ?? {};
+app.post(
+  "/api/suggest",
+  route(async (req, res) => {
+    const { hex, rgb } = req.body ?? {};
     let color = rgb;
     if (!color && hex) {
       const h = String(hex).replace("#", "");
       const n = Number.parseInt(h.length === 3 ? h.split("").map((c: string) => c + c).join("") : h, 16);
       color = { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
     }
-    if (!color) {
-      res.status(400).json({ error: "Provide hex or rgb" });
-      return;
-    }
-    const result = await colorEngine.suggestAlternatives(color, profileId);
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: String(err) });
-  }
-});
+    if (!color) throw new HttpError(400, "Provide hex or rgb.");
+    res.json(await colorEngine.suggestAlternatives(color, profileIdFrom(req)));
+  }),
+);
 
-app.post("/api/seed-analyze", async (req, res) => {
-  try {
-    const profileId = String(req.body?.profileId ?? "auto");
-    const analysis = await colorEngine.analyzeHexColors([...SEED_TEST_COLORS], profileId);
+app.post(
+  "/api/seed-analyze",
+  route(async (req, res) => {
+    const analysis = await colorEngine.analyzeHexColors([...SEED_TEST_COLORS], profileIdFrom(req));
     res.json({ analysis, seeds: SEED_TEST_COLORS });
-  } catch (err) {
-    res.status(500).json({ error: String(err) });
-  }
-});
+  }),
+);
 
-app.post("/api/export/proof", upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file) {
-      res.status(400).json({ error: "Missing file" });
-      return;
-    }
-    const profileId = String(req.body.profileId ?? "auto");
-    const result = await colorEngine.softProofImage(req.file.buffer, profileId, 4000);
-    res.setHeader("Content-Type", "image/png");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="cmyk-soft-proof-${result.profile.shortLabel.replace(/\s+/g, "-").toLowerCase()}.png"`,
-    );
-    res.send(result.buffer);
-  } catch (err) {
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-app.post("/api/export/tiff", upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file) {
-      res.status(400).json({ error: "Missing file" });
-      return;
-    }
-    const profileId = String(req.body.profileId ?? "auto");
-    const result = await colorEngine.exportCmykTiff(req.file.buffer, profileId);
+app.post(
+  "/api/export/tiff",
+  upload.single("file"),
+  route(async (req, res) => {
+    const file = requireFile(req);
+    const result = await colorEngine.exportCmykTiff(file.buffer, profileIdFrom(req));
     if (!result.buffer) {
-      res.status(400).json({
-        error:
-          "CMYK TIFF export requires an installed ICC profile for the selected condition. Place a profile in /profiles.",
-      });
-      return;
+      throw new HttpError(
+        400,
+        "CMYK TIFF export needs an installed ICC profile for the selected print condition.",
+      );
     }
     res.setHeader("Content-Type", "image/tiff");
     res.setHeader("Content-Disposition", 'attachment; filename="cmyk-export.tif"');
     res.send(result.buffer);
-  } catch (err) {
-    res.status(500).json({ error: String(err) });
-  }
-});
+  }),
+);
 
-app.post("/api/export/report", upload.single("file"), async (req, res) => {
-  try {
-    const profileId = String(req.body.profileId ?? "auto");
+app.post(
+  "/api/export/report",
+  upload.single("file"),
+  route(async (req, res) => {
+    const profileId = profileIdFrom(req);
     let analysis;
     let thumbBase64 = "";
 
@@ -161,8 +158,7 @@ app.post("/api/export/report", upload.single("file"), async (req, res) => {
     } else if (req.body?.seed) {
       analysis = await colorEngine.analyzeHexColors([...SEED_TEST_COLORS], profileId);
     } else {
-      res.status(400).json({ error: "Missing file" });
-      return;
+      throw new HttpError(400, "No image was uploaded.");
     }
 
     const date = new Date().toISOString();
@@ -230,9 +226,37 @@ app.post("/api/export/report", upload.single("file"), async (req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Content-Disposition", 'attachment; filename="cmyk-proofing-report.html"');
     res.send(html);
-  } catch (err) {
-    res.status(500).json({ error: String(err) });
+  }),
+);
+
+function toHttpError(err: unknown): HttpError {
+  if (err instanceof HttpError) return err;
+  if (err instanceof multer.MulterError) {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return new HttpError(413, `This file is larger than ${maxUploadMb} MB. Try a smaller export.`);
+    }
+    return new HttpError(400, "The upload could not be read. Send a single image file.");
   }
-});
+  const status = (err as { status?: unknown })?.status;
+  if (typeof status === "number" && status >= 400 && status < 500) {
+    return new HttpError(status, "The request could not be read.");
+  }
+  const text = err instanceof Error ? err.message : String(err);
+  if (/pixel limit/i.test(text)) {
+    return new HttpError(413, "This image has too many pixels. Export it under 40 megapixels and try again.");
+  }
+  if (/unsupported image format|bad seek|corrupt|premature end/i.test(text)) {
+    return new HttpError(415, "This file couldn't be read as an image. Upload a PNG, JPG, WebP or SVG.");
+  }
+  return new HttpError(500, "Something went wrong while processing this image. Please try again.");
+}
+
+const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
+  const httpError = toHttpError(err);
+  if (httpError.status >= 500) console.error(err);
+  res.status(httpError.status).json({ error: httpError.message });
+};
+
+app.use(errorHandler);
 
 export default app;

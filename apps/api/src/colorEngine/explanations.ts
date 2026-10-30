@@ -1,6 +1,33 @@
 import type { RgbColor } from "@cmyk/shared";
 import { rgbToHsl, rgbToLab } from "./colorMath.js";
 
+/** Short headline describing how the printed color differs, for non-experts. */
+export function describeShift(original: RgbColor, softProof: RgbColor, deltaE: number): string {
+  if (deltaE < 3) return "Should print close to how it looks on screen";
+
+  const oLab = rgbToLab(original);
+  const pLab = rgbToLab(softProof);
+  const oChroma = Math.hypot(oLab.a, oLab.b);
+  const pChroma = Math.hypot(pLab.a, pLab.b);
+  const lightDelta = pLab.L - oLab.L;
+  const hueDelta = Math.abs(
+    ((Math.atan2(pLab.b, pLab.a) - Math.atan2(oLab.b, oLab.a)) * 180) / Math.PI,
+  );
+  const hueShift = Math.min(hueDelta, 360 - hueDelta);
+
+  const changes: string[] = [];
+  if (oChroma - pChroma > 5) changes.push("duller");
+  if (lightDelta < -3) changes.push("darker");
+  else if (lightDelta > 3) changes.push("lighter");
+
+  if (changes.length === 0) {
+    return oChroma > 15 && hueShift > 8
+      ? "Will print with a noticeably different hue"
+      : "Will print slightly differently";
+  }
+  return `Will print ${changes.join(" and ")}`;
+}
+
 export function explainShift(
   original: RgbColor,
   softProof: RgbColor,
@@ -19,7 +46,7 @@ export function explainShift(
   const hue = oHsl.h;
   const sat = oHsl.s;
 
-  if (sat > 70 && hue >= 250 && hue <= 300) {
+  if (sat > 70 && hue >= 250 && hue < 295) {
     return "Highly saturated violet is outside the printable CMYK gamut, so the proof loses some blue/magenta intensity.";
   }
   if (sat > 70 && hue >= 210 && hue < 250) {
@@ -31,7 +58,7 @@ export function explainShift(
   if (sat > 70 && (hue <= 20 || hue >= 340)) {
     return "Highly saturated reds often lose punch in CMYK; the soft proof looks slightly duller.";
   }
-  if (sat > 70 && hue > 300 && hue < 340) {
+  if (sat > 70 && hue >= 295 && hue < 340) {
     return "Neon pinks/magentas sit near the edge of coated CMYK; expect a softer, less electric result.";
   }
   if (sat > 75 && hue > 160 && hue < 200) {
